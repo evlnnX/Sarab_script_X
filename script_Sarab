@@ -1,0 +1,680 @@
+-- [[ SARAB FLUENT HUB | واجهة Fluent بدون ألوان زائدة + بتـن محسن ]] --
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local CoreGui = game:GetService("CoreGui")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+local State = {
+    PreviousCFrame = nil,
+    AutoInteract = false,
+    Noclip = false,
+    FullBright = false,
+    SpeedActive = false,
+    WalkSpeed = 30,
+    AutoReturnAfterTP = false
+}
+
+local SavedEnv = {
+    Brightness = Lighting.Brightness,
+    ClockTime = Lighting.ClockTime,
+    FogEnd = Lighting.FogEnd,
+    GlobalShadows = Lighting.GlobalShadows,
+    Ambient = Lighting.Ambient
+}
+
+-- ==========================================
+-- دوال البحث والانتقال وأوامر المراحل
+-- ==========================================
+local function SaveCurrentSpot()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        State.PreviousCFrame = hrp.CFrame
+    end
+end
+
+local function TeleportCFrame(cf, label, savePrev, notifyFn)
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if hrp and cf then
+        if savePrev ~= false then
+            State.PreviousCFrame = hrp.CFrame
+        end
+        hrp.CFrame = cf + Vector3.new(0, 3, 0)
+        if notifyFn then
+            notifyFn("تم الانتقال", "إلى: " .. tostring(label), 3)
+        end
+    end
+end
+
+local function FindByKeywords(keywords)
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local bestPart, bestDist = nil, math.huge
+
+    for _, desc in ipairs(Workspace:GetDescendants()) do
+        if desc:IsA("BasePart") or desc:IsA("Model") then
+            local part = desc:IsA("BasePart") and desc or desc:FindFirstChildWhichIsA("BasePart", true)
+            if part and part.Parent and not Players:GetPlayerFromCharacter(part.Parent) then
+                local combined = string.lower(desc.Name .. " " .. part.Name)
+                for _, prompt in ipairs(desc:GetDescendants()) do
+                    if prompt:IsA("ProximityPrompt") then
+                        combined = combined .. " " .. string.lower(prompt.ObjectText .. " " .. prompt.ActionText)
+                    end
+                end
+                for _, kw in ipairs(keywords) do
+                    if string.find(combined, string.lower(kw), 1, true) then
+                        local d = hrp and (part.Position - hrp.Position).Magnitude or 0
+                        if d < bestDist then
+                            bestDist = d
+                            bestPart = part
+                        end
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return bestPart
+end
+
+local function TeleportKeywords(keywords, displayName, fallbackNearest, notifyFn)
+    local found = FindByKeywords(keywords)
+    if found then
+        TeleportCFrame(found.CFrame, displayName, true, notifyFn)
+        return true
+    end
+
+    if fallbackNearest then
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local nearPart, nearDist = nil, math.huge
+            for _, p in ipairs(Workspace:GetDescendants()) do
+                if p:IsA("ProximityPrompt") and p.Enabled and p.Parent then
+                    local part = p.Parent:IsA("BasePart") and p.Parent or p.Parent:FindFirstChildWhichIsA("BasePart", true)
+                    if part then
+                        local d = (part.Position - hrp.Position).Magnitude
+                        if d > 5 and d < nearDist then
+                            nearDist = d
+                            nearPart = part
+                        end
+                    end
+                end
+            end
+            if nearPart then
+                TeleportCFrame(nearPart.CFrame, displayName .. " (أقرب غرض)", true, notifyFn)
+                return true
+            end
+        end
+    end
+
+    if notifyFn then
+        notifyFn("تنبيه", "لم يتم العثور على (" .. displayName .. ") حالياً", 3)
+    end
+    return false
+end
+
+local function DeleteDoorsByKeywords(keywords, label, notifyFn)
+    local removed = 0
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") or obj:IsA("Model") then
+            local nameLower = string.lower(obj.Name)
+            for _, kw in ipairs(keywords) do
+                if string.find(nameLower, string.lower(kw), 1, true) then
+                    local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
+                    if part then
+                        pcall(function()
+                            part.CanCollide = false
+                            part.Transparency = 1
+                        end)
+                        removed = removed + 1
+                    end
+                    break
+                end
+            end
+        end
+    end
+    if notifyFn then
+        notifyFn("الأبواب", label .. " (" .. tostring(removed) .. ")", 3)
+    end
+end
+
+-- ==========================================
+-- تحميل Fluent UI مع بديل بسيط بدون ألوان زائدة
+-- ==========================================
+local Fluent = nil
+pcall(function()
+    Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+end)
+
+local function SendAlert(title, content, duration)
+    if Fluent and Fluent.Notify then
+        pcall(function()
+            Fluent:Notify({
+                Title = title,
+                Content = content,
+                Duration = duration or 3
+            })
+        end)
+    end
+end
+
+-- دالة تحسين البتن العائم (سحب سلس + نقرة دقيقة لفتح/إغلاق الواجهة)
+local function AttachSmartMobileButton(onToggleClick, labelText)
+    pcall(function()
+        if CoreGui:FindFirstChild("SarabFluentMobileBtn") then
+            CoreGui.SarabFluentMobileBtn:Destroy()
+        end
+        if LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("SarabFluentMobileBtn") then
+            LocalPlayer.PlayerGui.SarabFluentMobileBtn:Destroy()
+        end
+    end)
+
+    local MobileGui = Instance.new("ScreenGui")
+    MobileGui.Name = "SarabFluentMobileBtn"
+    MobileGui.ResetOnSpawn = false
+    MobileGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+    local ok = pcall(function()
+        MobileGui.Parent = CoreGui
+    end)
+    if not ok then
+        MobileGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
+
+    local btn = Instance.new("TextButton")
+    btn.Name = "SmartToggleBtn"
+    btn.Size = UDim2.new(0, 56, 0, 56)
+    btn.Position = UDim2.new(0.03, 0, 0.25, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+    btn.Text = labelText or "Fluent"
+    btn.TextColor3 = Color3.fromRGB(240, 240, 245)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.AutoButtonColor = true
+    btn.Active = true
+    btn.Parent = MobileGui
+
+    local cr = Instance.new("UICorner")
+    cr.CornerRadius = UDim.new(0, 14)
+    cr.Parent = btn
+
+    local st = Instance.new("UIStroke")
+    st.Color = Color3.fromRGB(70, 70, 80)
+    st.Thickness = 1.4
+    st.Parent = btn
+
+    local dragging = false
+    local moved = false
+    local dragInput = nil
+    local dragStart = nil
+    local startPos = nil
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            moved = false
+            dragStart = input.Position
+            startPos = btn.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    local wasMoved = moved
+                    dragging = false
+                    dragInput = nil
+                    if not wasMoved and onToggleClick then
+                        onToggleClick()
+                    end
+                end
+            end)
+        end
+    end)
+
+    btn.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input == dragInput then
+            local delta = input.Position - dragStart
+            if delta.Magnitude > 7 then
+                moved = true
+            end
+            btn.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    return btn
+end
+
+local function PopulateStageTabs(addTabFn)
+    -- المرحلة الأولى
+    local tab1 = addTabFn({ Title = "المرحلة الأولى", Icon = "home" })
+    tab1:AddSection("المرحلة الأولى")
+
+    tab1:AddButton({
+        Title = "انتقال للبن",
+        Description = "ينتقل إلى موقع اللبن / الحليب",
+        Callback = function()
+            TeleportKeywords({"laban", "milk", "لبن", "حليب"}, "اللبن", true, SendAlert)
+        end
+    })
+
+    tab1:AddButton({
+        Title = "انتقال لصندوق الماء",
+        Description = "ينتقل إلى صندوق الماء",
+        Callback = function()
+            TeleportKeywords({"water", "ماء", "موية", "صندوق"}, "صندوق الماء", true, SendAlert)
+        end
+    })
+
+    tab1:AddButton({
+        Title = "انتقال لشريحة الرز",
+        Description = "ينتقل إلى شريحة أو كيس الرز",
+        Callback = function()
+            TeleportKeywords({"rice", "رز", "شريحة"}, "شريحة الرز", true, SendAlert)
+        end
+    })
+
+    tab1:AddButton({
+        Title = "انتقال لدفتر الدفتر",
+        Description = "ينتقل إلى الدفتر أو الورق",
+        Callback = function()
+            TeleportKeywords({"book", "note", "paper", "دفتر", "مذكرة"}, "دفتر الدفتر", true, SendAlert)
+        end
+    })
+
+    tab1:AddSection("العودة والحماية")
+
+    tab1:AddButton({
+        Title = "حفظ موقعي الحالي",
+        Description = "يحفظ موقعك للعودة إليه لاحقاً",
+        Callback = function()
+            SaveCurrentSpot()
+            SendAlert("تم الحفظ", "تم حفظ موقعك الحالي", 3)
+        end
+    })
+
+    tab1:AddButton({
+        Title = "رجوع للمكان السابق",
+        Description = "يرجعك لمكانك قبل آخر انتقال",
+        Callback = function()
+            if State.PreviousCFrame then
+                TeleportCFrame(State.PreviousCFrame, "المكان السابق", false, SendAlert)
+            else
+                SendAlert("تنبيه", "لا يوجد موقع سابق محفوظ", 3)
+            end
+        end
+    })
+
+    -- المرحلة الثانية
+    local tab2 = addTabFn({ Title = "المرحلة الثانية", Icon = "layers" })
+    tab2:AddSection("المويه")
+
+    tab2:AddButton({
+        Title = "كشف مصدر المويه",
+        Description = "ينتقل لمصدر أو عبوة المويه",
+        Callback = function()
+            TeleportKeywords({"water", "source", "موية", "ماء", "مصدر"}, "مصدر المويه", true, SendAlert)
+        end
+    })
+
+    tab2:AddButton({
+        Title = "كشف صرف المويه",
+        Description = "ينتقل إلى نقطة صرف أو توصيل الماء",
+        Callback = function()
+            TeleportKeywords({"drain", "pipe", "sink", "صرف", "مجرى"}, "صرف المويه", true, SendAlert)
+        end
+    })
+
+    tab2:AddSection("حذف باب المدير")
+
+    tab2:AddButton({
+        Title = "حذف باب المدير",
+        Description = "يفتح/يخفي باب المدير",
+        Callback = function()
+            DeleteDoorsByKeywords({"manager", "boss", "office", "مدير", "باب"}, "تم فتح/إخفاء باب المدير", SendAlert)
+        end
+    })
+
+    tab2:AddSection("انتقالات")
+
+    tab2:AddToggle("AutoReturnStage2", {
+        Title = "رجوع لمكان السابق",
+        Default = false,
+        Callback = function(v)
+            State.AutoReturnAfterTP = v
+        end
+    })
+
+    tab2:AddButton({
+        Title = "رجوع للمكان السابق الآن",
+        Description = "يرجعك لمكانك السابق فوراً",
+        Callback = function()
+            if State.PreviousCFrame then
+                TeleportCFrame(State.PreviousCFrame, "المكان السابق", false, SendAlert)
+            else
+                SendAlert("تنبيه", "لا يوجد موقع سابق محفوظ", 3)
+            end
+        end
+    })
+
+    tab2:AddButton({
+        Title = "انتقال للصورة واحدة",
+        Description = "ينتقل إلى الهدف الأول",
+        Callback = function()
+            TeleportKeywords({"key", "card", "photo", "picture", "1", "مفتاح"}, "الصورة واحدة", true, SendAlert)
+        end
+    })
+
+    tab2:AddButton({
+        Title = "انتقال للصورة الثانية",
+        Description = "ينتقل إلى الهدف الثاني",
+        Callback = function()
+            TeleportKeywords({"door", "exit", "code", "2", "مخرج", "باب"}, "الصورة الثانية", true, SendAlert)
+        end
+    })
+
+    -- المرحلة الثالثة
+    local tab3 = addTabFn({ Title = "المرحلة الثالثة", Icon = "sparkles" })
+    tab3:AddSection("المرحلة الثالثة")
+
+    tab3:AddButton({
+        Title = "انتقال للقبر",
+        Description = "ينتقل إلى موقع القبر",
+        Callback = function()
+            TeleportKeywords({"grave", "tomb", "burial", "قبر", "مقبرة"}, "القبر", true, SendAlert)
+        end
+    })
+
+    tab3:AddButton({
+        Title = "انتقال للكنز",
+        Description = "ينتقل إلى موقع الكنز",
+        Callback = function()
+            TeleportKeywords({"treasure", "chest", "gold", "relic", "كنز", "صندوق"}, "الكنز", true, SendAlert)
+        end
+    })
+
+    tab3:AddButton({
+        Title = "كشف عليه السحر",
+        Description = "ينتقل لمصدر السحر أو الرموز",
+        Callback = function()
+            TeleportKeywords({"magic", "curse", "spell", "ritual", "سحر", "تعويذة"}, "مصدر السحر", true, SendAlert)
+        end
+    })
+
+    -- عام / أدوات
+    local tabGen = addTabFn({ Title = "عام / أدوات", Icon = "sliders" })
+    tabGen:AddSection("أدوات البقاء والحركة")
+
+    tabGen:AddToggle("FluentAutoInteract", {
+        Title = "تفاعل وأخذ تلقائي",
+        Default = false,
+        Callback = function(v)
+            State.AutoInteract = v
+        end
+    })
+
+    tabGen:AddToggle("FluentNoclip", {
+        Title = "اختراق الجدران (Noclip)",
+        Default = false,
+        Callback = function(v)
+            State.Noclip = v
+        end
+    })
+
+    tabGen:AddToggle("FluentFullBright", {
+        Title = "إضاءة كاملة (FullBright)",
+        Default = false,
+        Callback = function(v)
+            State.FullBright = v
+            if not v then
+                Lighting.Brightness = SavedEnv.Brightness
+                Lighting.ClockTime = SavedEnv.ClockTime
+                Lighting.FogEnd = SavedEnv.FogEnd
+                Lighting.GlobalShadows = SavedEnv.GlobalShadows
+                Lighting.Ambient = SavedEnv.Ambient
+            end
+        end
+    })
+
+    tabGen:AddToggle("FluentSpeed", {
+        Title = "سرعة حركة إضافية",
+        Default = false,
+        Callback = function(v)
+            State.SpeedActive = v
+            if not v and LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
+                LocalPlayer.Character:FindFirstChildOfClass("Humanoid").WalkSpeed = 16
+            end
+        end
+    })
+end
+
+if Fluent then
+    local Window = Fluent:CreateWindow({
+        Title = "Sarab",
+        SubTitle = "Fluent UI",
+        TabWidth = 135,
+        Size = UDim2.fromOffset(520, 360),
+        Acrylic = true,
+        Theme = "Dark",
+        MinimizeKey = Enum.KeyCode.RightControl
+    })
+
+    AttachSmartMobileButton(function()
+        pcall(function()
+            if Window.Minimize then
+                Window:Minimize()
+            end
+        end)
+    end, "Fluent")
+
+    PopulateStageTabs(function(opts)
+        return Window:AddTab(opts)
+    end)
+
+    Window:SelectTab(1)
+    SendAlert("Sarab", "تم التشغيل", 3)
+else
+    -- واجهة احتياطية حيادية بدون ألوان زائدة
+    local FallbackGui = Instance.new("ScreenGui")
+    FallbackGui.Name = "SarabFluentFallback"
+    FallbackGui.ResetOnSpawn = false
+    FallbackGui.Parent = CoreGui
+
+    local Main = Instance.new("Frame")
+    Main.Size = UDim2.new(0, 480, 0, 340)
+    Main.Position = UDim2.new(0.5, -240, 0.5, -170)
+    Main.BackgroundColor3 = Color3.fromRGB(20, 20, 23)
+    Main.Active = true
+    Main.Parent = FallbackGui
+
+    local mCr = Instance.new("UICorner")
+    mCr.CornerRadius = UDim.new(0, 12)
+    mCr.Parent = Main
+
+    local Top = Instance.new("Frame")
+    Top.Size = UDim2.new(1, 0, 0, 40)
+    Top.BackgroundColor3 = Color3.fromRGB(26, 26, 30)
+    Top.Parent = Main
+
+    local TopLbl = Instance.new("TextLabel")
+    TopLbl.Size = UDim2.new(1, -20, 1, 0)
+    TopLbl.Position = UDim2.new(0, 10, 0, 0)
+    TopLbl.BackgroundTransparency = 1
+    TopLbl.Text = "Sarab • Fluent"
+    TopLbl.TextColor3 = Color3.fromRGB(235, 235, 240)
+    TopLbl.Font = Enum.Font.GothamBold
+    TopLbl.TextSize = 14
+    TopLbl.TextXAlignment = Enum.TextXAlignment.Left
+    TopLbl.Parent = Top
+
+    AttachSmartMobileButton(function()
+        Main.Visible = not Main.Visible
+    end, "Fluent")
+
+    local Side = Instance.new("Frame")
+    Side.Size = UDim2.new(0, 130, 1, -46)
+    Side.Position = UDim2.new(0, 6, 0, 43)
+    Side.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+    Side.Parent = Main
+
+    local sLay = Instance.new("UIListLayout")
+    sLay.Padding = UDim.new(0, 5)
+    sLay.Parent = Side
+
+    local Body = Instance.new("ScrollingFrame")
+    Body.Size = UDim2.new(1, -148, 1, -46)
+    Body.Position = UDim2.new(0, 142, 0, 43)
+    Body.BackgroundTransparency = 1
+    Body.ScrollBarThickness = 4
+    Body.CanvasSize = UDim2.new(0, 0, 0, 0)
+    Body.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    Body.Parent = Main
+
+    local bLay = Instance.new("UIListLayout")
+    bLay.Padding = UDim.new(0, 6)
+    bLay.Parent = Body
+
+    local allPages, allTabs = {}, {}
+    PopulateStageTabs(function(opts)
+        local pg = Instance.new("Frame")
+        pg.Size = UDim2.new(1, 0, 0, 0)
+        pg.AutomaticSize = Enum.AutomaticSize.Y
+        pg.BackgroundTransparency = 1
+        pg.Visible = false
+        pg.Parent = Body
+
+        local pLay = Instance.new("UIListLayout")
+        pLay.Padding = UDim.new(0, 6)
+        pLay.Parent = pg
+
+        local tBtn = Instance.new("TextButton")
+        tBtn.Size = UDim2.new(1, 0, 0, 34)
+        tBtn.BackgroundColor3 = Color3.fromRGB(32, 32, 37)
+        tBtn.Text = opts.Title
+        tBtn.TextColor3 = Color3.fromRGB(225, 225, 230)
+        tBtn.Font = Enum.Font.GothamBold
+        tBtn.TextSize = 12
+        tBtn.Parent = Side
+
+        table.insert(allPages, pg)
+        table.insert(allTabs, tBtn)
+
+        tBtn.MouseButton1Click:Connect(function()
+            for idx, p in ipairs(allPages) do
+                p.Visible = (p == pg)
+                allTabs[idx].BackgroundColor3 = (p == pg) and Color3.fromRGB(45, 45, 52) or Color3.fromRGB(32, 32, 37)
+            end
+        end)
+
+        if #allPages == 1 then
+            pg.Visible = true
+            tBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+        end
+
+        return {
+            AddSection = function(_, secTitle)
+                local lbl = Instance.new("TextLabel")
+                lbl.Size = UDim2.new(1, 0, 0, 24)
+                lbl.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+                lbl.Text = "  " .. secTitle
+                lbl.TextColor3 = Color3.fromRGB(235, 235, 240)
+                lbl.Font = Enum.Font.GothamBold
+                lbl.TextSize = 12
+                lbl.TextXAlignment = Enum.TextXAlignment.Right
+                lbl.Parent = pg
+            end,
+            AddButton = function(_, bOpts)
+                local b = Instance.new("TextButton")
+                b.Size = UDim2.new(1, 0, 0, 38)
+                b.BackgroundColor3 = Color3.fromRGB(32, 32, 37)
+                b.Text = bOpts.Title .. (bOpts.Description and (" — " .. bOpts.Description) or "")
+                b.TextColor3 = Color3.fromRGB(235, 235, 240)
+                b.Font = Enum.Font.GothamSemibold
+                b.TextSize = 11
+                b.Parent = pg
+                b.MouseButton1Click:Connect(bOpts.Callback)
+            end,
+            AddToggle = function(_, _, tOpts)
+                local on = tOpts.Default or false
+                local b = Instance.new("TextButton")
+                b.Size = UDim2.new(1, 0, 0, 36)
+                b.BackgroundColor3 = Color3.fromRGB(32, 32, 37)
+                b.Text = tOpts.Title .. ": " .. (on and "ON" or "OFF")
+                b.TextColor3 = Color3.fromRGB(235, 235, 240)
+                b.Font = Enum.Font.GothamSemibold
+                b.TextSize = 12
+                b.Parent = pg
+                b.MouseButton1Click:Connect(function()
+                    on = not on
+                    b.Text = tOpts.Title .. ": " .. (on and "ON" or "OFF")
+                    tOpts.Callback(on)
+                end)
+            end
+        }
+    end)
+end
+
+-- ==========================================
+-- حلقات التشغيل المستمرة
+-- ==========================================
+RunService.Stepped:Connect(function()
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    if State.Noclip then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                part.CanCollide = false
+            end
+        end
+    end
+
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum and State.SpeedActive then
+        hum.WalkSpeed = State.WalkSpeed
+    end
+
+    if State.FullBright then
+        Lighting.Brightness = 2
+        Lighting.ClockTime = 14
+        Lighting.FogEnd = 100000
+        Lighting.GlobalShadows = false
+        Lighting.Ambient = Color3.fromRGB(205, 205, 205)
+    end
+end)
+
+task.spawn(function()
+    while task.wait(0.35) do
+        if State.AutoInteract then
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                for _, prompt in ipairs(Workspace:GetDescendants()) do
+                    if prompt:IsA("ProximityPrompt") and prompt.Enabled and prompt.Parent then
+                        local part = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart", true)
+                        if part and (part.Position - hrp.Position).Magnitude <= prompt.MaxActivationDistance + 6 then
+                            pcall(function()
+                                fireproximityprompt(prompt)
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
